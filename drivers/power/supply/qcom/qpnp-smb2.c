@@ -436,7 +436,7 @@ void smbchg_set_chargerid_switch_val(int value)
 int smbchg_get_chargerid_switch_val(void)
 {
 	struct oppo_chg_chip *chip = g_oppo_chip;
-	
+
 	if (chip->normalchg_gpio.chargerid_switch_gpio <= 0) {
 		chg_err("chargerid_switch_gpio not exist, return\n");
 		return -1;
@@ -585,7 +585,7 @@ void oppo_ccdetect_enable(void)
 }
 
 void oppo_ccdetect_disable(void)
-{    
+{
 	bool value = false;
 	if(oppo_ccdetect_support_check() == OPPO_SUPPORT_CCDETECT_IN_FTM_MODE)
 	{
@@ -932,6 +932,12 @@ static int smb2_parse_dt(struct smb2 *chip)
 
 	chg->disable_stat_sw_override = of_property_read_bool(node,
 					"qcom,disable-stat-sw-override");
+
+        chg->fcc_stepper_enable = of_property_read_bool(node,
+					"qcom,fcc-stepping-enable");
+
+	chg->ufp_only_mode = of_property_read_bool(node,
+					"qcom,ufp-only-mode");
 
 	return 0;
 }
@@ -2987,6 +2993,8 @@ static int smb2_post_init(struct smb2 *chip)
 /* Jianchao.Shi@BSP.CHG.Basic, 2018/01/30, sjc Add for using gpio as CC detect */
     int level = 0;
 #endif
+	u8 stat;
+
 	/* In case the usb path is suspended, we would have missed disabling
 	 * the icl change interrupt because the interrupt could have been
 	 * not requested
@@ -3025,6 +3033,37 @@ static int smb2_post_init(struct smb2 *chip)
         return rc;
     }
 #endif
+	/* Force charger in Sink Only mode */
+	if (chg->ufp_only_mode) {
+		rc = smblib_read(chg, TYPE_C_INTRPT_ENB_SOFTWARE_CTRL_REG,
+				&stat);
+		if (rc < 0) {
+			dev_err(chg->dev,
+				"Couldn't read SOFTWARE_CTRL_REG rc=%d\n", rc);
+			return rc;
+		}
+
+		if (!(stat & UFP_EN_CMD_BIT)) {
+			/* configure charger in UFP only mode */
+			rc  = smblib_force_ufp(chg);
+			if (rc < 0) {
+				dev_err(chg->dev,
+					"Couldn't force UFP mode rc=%d\n", rc);
+				return rc;
+			}
+		}
+	} else {
+		/* configure power role for dual-role */
+		rc = smblib_masked_write(chg,
+					TYPE_C_INTRPT_ENB_SOFTWARE_CTRL_REG,
+					TYPEC_POWER_ROLE_CMD_MASK, 0);
+		if (rc < 0) {
+			dev_err(chg->dev,
+				"Couldn't configure power role for DRP rc=%d\n",
+				rc);
+			return rc;
+		}
+	}
 
 	rerun_election(chg->usb_irq_enable_votable);
 
@@ -5035,8 +5074,9 @@ static void smb2_shutdown(struct platform_device *pdev)
 	/* disable all interrupts */
 	smb2_disable_interrupts(chg);
 
-	/* configure power role for UFP */
-	smblib_masked_write(chg, TYPE_C_INTRPT_ENB_SOFTWARE_CTRL_REG,
+	if (!chg->ufp_only_mode)
+		/* configure power role for UFP */
+		smblib_masked_write(chg, TYPE_C_INTRPT_ENB_SOFTWARE_CTRL_REG,
 				TYPEC_POWER_ROLE_CMD_MASK, UFP_EN_CMD_BIT);
 
 	/* force HVDCP to 5V */
